@@ -1,4 +1,4 @@
-# Pipeline CNPJ — Matriz vs. Filial em São Paulo
+# Pipeline CNPJ — Matriz vs. Filial em São Paulo (com Apache Airflow)
 
 Pipeline de dados que responde à pergunta de negócio do time de Inteligência
 de Mercado:
@@ -7,6 +7,24 @@ de Mercado:
 > cidade de São Paulo?**
 
 Fonte: [Dados Abertos do CNPJ — Receita Federal](https://arquivos.receitafederal.gov.br/dados/cnpj/dados_abertos_cnpj).
+
+Este repositório é a evolução do [pipeline base](https://github.com/caiohenrique-dbcloud/cnpj-pipeline),
+adicionando orquestração com **Apache Airflow**.
+
+---
+
+## Resultado validado
+
+Executando a pipeline via Airflow, com dados reais da Receita Federal
+(amostra de uma partição do arquivo de dezembro/2025):
+
+| Tipo | Quantidade |
+|---|---|
+| Matriz | 984.186 |
+| Filial | 33.035 |
+| **Total** | **1.017.221** |
+
+Todas as três tarefas da DAG (Bronze → Silver → Gold) concluídas com sucesso.
 
 ---
 
@@ -21,303 +39,193 @@ Receita Federal (.zip)          BRONZE                SILVER                    
                           (data lake / MinIO)     (data lake / MinIO)      (data lake / MinIO)
 ```
 
+```
+                    ┌─────────────────────────────────────┐
+                    │         Docker Compose                │
+  ┌──────────┐      │  ┌───────────┐    ┌────────────────┐ │
+  │  Browser  │─────┼─▶│  Webserver │───▶│   Scheduler    │ │
+  └──────────┘      │  └─────┬─────┘    └────────┬───────┘ │
+                    │        ▼                    ▼         │
+                    │  ┌───────────┐      ┌───────────────┐ │
+                    │  │  Postgres  │      │     MinIO      │ │
+                    │  │ (metadados │      │ (Bronze/Silver/│ │
+                    │  │ do Airflow)│      │     Gold)      │ │
+                    │  └───────────┘      └───────────────┘ │
+                    └─────────────────────────────────────┘
+```
+
 Segue a **Arquitetura Medallion**:
 
 | Camada | Conteúdo | Formato | Por quê |
 |---|---|---|---|
-| **Bronze** | Cópia fiel do `.zip` baixado da RFB | ZIP (raw) | Preserva o dado original — se a lógica de negócio mudar amanhã, reprocessamos sem baixar de novo. |
-| **Silver** | Estabelecimentos de SP, Ativos, já cruzados com Municípios | Parquet | Formato colunar, comprimido, rápido de ler nas próximas etapas. Já limpo e com tipos definidos. |
-| **Gold** | Tabela agregada Matriz x Filial + gráfico | CSV + PNG | Pronto para consumo direto por negócio/BI, sem reprocessamento. |
+| **Bronze** | Cópia fiel do `.zip` baixado da RFB | ZIP (raw) | Preserva o dado original. |
+| **Silver** | Estabelecimentos de SP, Ativos, já cruzados com Municípios | Parquet | Formato colunar, comprimido, com tipos definidos. |
+| **Gold** | Tabela agregada Matriz x Filial + gráfico | CSV + PNG | Pronto para consumo direto por negócio/BI. |
 
-### Por que DuckDB em vez de Spark?
+### Por que Airflow
 
-Os arquivos de `Estabelecimentos` somam vários GB descompactados. Carregar
-tudo em memória com pandas não é viável numa máquina comum. Em vez de subir
-um cluster Spark (que exige mais infraestrutura), usei o **DuckDB**, que lê
-os CSVs em streaming (out-of-core) com SQL puro e escala muito bem para um
-volume desse porte numa única máquina — um trade-off consciente para um MVP.
+Transformar as 3 camadas em tarefas orquestradas (em vez de um script
+sequencial único) traz vantagens reais de operação:
 
-> Em um cenário de produção, com histórico de múltiplos meses/UFs sendo
-> processado continuamente, o próximo passo natural seria migrar essa mesma
-> lógica SQL para **PySpark** (para paralelismo real em cluster) orquestrado
-> via **Airflow** (agendamento, retries, monitoramento, backfill). A
-> estrutura em camadas e a separação de responsabilidades (`ingest.py` /
-> `process.py` / `aggregate.py`) já foi pensada para facilitar essa migração
-> — cada função viraria uma Task de uma DAG.
+- Retry automático por tarefa, isolado — uma falha na Silver não obriga
+  reprocessar a Bronze.
+- Agendamento nativo (a DAG está configurada para rodar mensalmente).
+- Rastreabilidade completa via metadados: cada execução, cada tentativa e
+  sua duração ficam registradas e são consultáveis via SQL.
+- Parametrização pela própria interface (ano, mês, modo de teste), sem
+  precisar alterar código para rodar um período diferente.
 
-### Por que MinIO?
+### Por que DuckDB em vez de Spark
 
-Simula localmente um Data Lake S3-compatível, o que deixa o projeto
-portável: o mesmo código roda apontando para MinIO local ou para um S3 real
-em produção, só trocando variáveis de ambiente — sem alterar uma linha de
-código (ver `src/storage.py`).
+Os arquivos de `Estabelecimentos` somam vários GB descompactados. Em vez de
+um cluster Spark, o **DuckDB** processa os CSVs em streaming (out-of-core)
+com SQL puro — trade-off consciente de custo-benefício para este volume de
+dados rodando em uma única máquina.
 
-### Como o cruzamento de dados foi feito
+### Por que MinIO
 
-O arquivo de Estabelecimentos traz apenas o **código do município** (não o
-nome). Para filtrar "São Paulo" corretamente, foi necessário:
-
-1. Ler `Municipios.zip` (tabela de referência código → nome).
-2. Fazer `INNER JOIN` entre Estabelecimentos e Municípios pelo código.
-3. Filtrar `nome_municipio = 'SAO PAULO'` (sem acento — assim os dados vêm
-   na fonte) **e** `situacao_cadastral = '02'` (código de "Ativa" no layout
-   oficial da RFB).
-4. Segregar Matriz/Filial pela coluna `identificador_matriz_filial`
-   (`1 = Matriz`, `2 = Filial`).
-
-Todo esse cruzamento acontece em uma única query SQL no DuckDB
-(`src/process.py`), evitando um join custoso em pandas.
-
-### Idempotência
-
-Antes de executar cada camada, o pipeline verifica se a saída daquele
-período **já existe** no storage (`Storage.exists`). Se existir, a etapa é
-pulada — reexecutar o pipeline para o mesmo mês não duplica nem corrompe
-dados. Use `--force` para reprocessar mesmo assim (ex: se a lógica de
-negócio mudou).
-
-### Fallback de período (mês mais recente disponível)
-
-Se o mês/ano pedido ainda não tiver sido publicado pela Receita, o pipeline
-tenta automaticamente os meses anteriores (até 3, configurável) e usa o
-primeiro que encontrar dados publicados — atendendo ao requisito "Dezembro
-de 2025, ou o mês mais recente disponível".
+Simula localmente um Data Lake S3-compatível: o mesmo código roda apontando
+para MinIO local ou para um S3 real em produção, só trocando variáveis de
+ambiente (ver `src/storage.py`).
 
 ---
 
 ## Estrutura de pastas
 
 ```
-cnpj-pipeline/
-├── docker-compose.yml     # orquestra MinIO + pipeline
-├── Dockerfile
+cnpj-pipeline-airflow/
+├── docker-compose.yml       # MinIO + Postgres + Airflow (webserver/scheduler)
+├── Dockerfile                # imagem do serviço pipeline standalone
+├── Dockerfile.airflow         # imagem do Airflow com as dependências do projeto
 ├── requirements.txt
-├── .env.example
+├── dags/
+│   └── cnpj_pipeline_dag.py  # DAG: bronze -> silver -> gold
 ├── src/
-│   ├── config.py           # configurações e regras de negócio centralizadas
-│   ├── storage.py          # abstração MinIO <-> disco local
-│   ├── ingest.py           # camada Bronze
-│   ├── process.py          # camada Silver
-│   ├── aggregate.py        # camada Gold
-│   └── pipeline.py         # CLI / orquestrador
+│   ├── config.py              # configurações e regras de negócio
+│   ├── storage.py             # abstração MinIO <-> S3 <-> disco local
+│   ├── ingest.py               # camada Bronze (download + retomada + fallback)
+│   ├── process.py             # camada Silver
+│   ├── aggregate.py           # camada Gold
+│   └── pipeline.py            # CLI standalone (sem Airflow)
 ├── tests/
-│   └── test_pipeline.py    # testes unitários (lógica pura, sem rede)
-└── data/                   # usado apenas quando USE_MINIO=false
+│   └── test_pipeline.py       # testes unitários (lógica pura, sem rede)
+└── data/                       # usado apenas quando USE_MINIO=false
 ```
 
 ---
 
 ## Como rodar
 
-### Opção A — Docker Compose (recomendado)
-
-Pré-requisitos: Docker Desktop com integração WSL2 habilitada (Windows) ou
-Docker + Docker Compose nativos (Mac/Linux).
+Pré-requisitos: Docker e Docker Compose.
 
 ```bash
 git clone <url-do-seu-repositorio>
-cd cnpj-pipeline
+cd cnpj-pipeline-airflow
 
-docker compose build
+docker compose up airflow-init      # roda uma vez: cria o banco e o usuário admin
+docker compose up airflow-webserver airflow-scheduler minio -d
+```
+
+Acesse `http://localhost:8080` — login `admin` / senha `admin`.
+
+Ative a DAG `cnpj_pipeline_matriz_filial_sp` e clique em **"Trigger DAG
+w/ config"** para rodar com parâmetros customizados:
+
+```json
+{"year": 2025, "month": 12, "sample": 1, "mock": false}
+```
+
+| Parâmetro | Descrição |
+|---|---|
+| `year` / `month` | Período de referência (com fallback automático para o mês anterior se ainda não publicado) |
+| `sample` | Limita a quantidade de partições de Estabelecimentos baixadas (útil para validação rápida) |
+| `mock` | Se `true`, gera dados sintéticos localmente, sem acessar a internet (ver seção abaixo) |
+
+### Testando sem depender de download (modo mock)
+
+O projeto inclui um modo de teste com **dados sintéticos**, isolado por
+namespace dos dados reais (prefixo `MOCK-` no armazenamento — nunca ocupa
+o mesmo endereço que dados de produção usariam). Isso permite validar toda
+a orquestração em segundos, sem depender de baixar arquivos de ~2GB:
+
+```json
+{"year": 2025, "month": 12, "mock": true}
+```
+
+### Executando sem o Airflow (script direto)
+
+Também é possível rodar a pipeline como script standalone, sem orquestração:
+
+```bash
 docker compose run --rm pipeline --year 2025 --month 12 --sample 1
 ```
-
-**Por que `--sample 1` como comando recomendado:** os arquivos de
-`Estabelecimentos` vêm divididos em ~10 partes de ~1-2GB cada. Baixar o mês
-inteiro pode levar bastante tempo dependendo da internet e da estabilidade da
-fonte (ver seção de desafios abaixo). `--sample 1` baixa só a primeira parte,
-o que é suficiente para validar toda a pipeline (Bronze → Silver → Gold)
-rapidamente. O resultado com `--sample` é uma **amostra parcial** dos CNPJs
-do mês, não o número completo e exato de São Paulo.
-
-Para o resultado **completo e correto** (respondendo à pergunta de negócio
-com o dado real), rode sem essa flag — mas reserve mais tempo, pois envolve
-baixar todas as partições:
-
-```bash
-docker compose run --rm pipeline --year 2025 --month 12
-```
-
-Isso vai:
-1. Subir o MinIO (console web em `http://localhost:9001`, login `minioadmin`/`minioadmin`).
-2. Rodar o pipeline completo (Bronze → Silver → Gold) para o período informado.
-
-Graças à idempotência, rodar de novo (com ou sem `--sample`) não baixa de
-novo o que já foi baixado — só completa o que falta.
-
-### Opção B — Local, sem Docker (mais simples para desenvolvimento)
-
-Pré-requisitos: Python 3.11+.
-
-```bash
-git clone <url-do-seu-repositorio>
-cd cnpj-pipeline
-
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-
-pip install -r requirements.txt
-cp .env.example .env        # USE_MINIO=false por padrão -> grava em ./data
-
-python -m src.pipeline --year 2025 --month 12 --sample 1
-```
-
-Os resultados finais ficam em `data/gold/<ano>-<mes>/`:
-- `matriz_vs_filial_sp.csv` — tabela agregada.
-- `matriz_vs_filial_sp.png` — gráfico de barras.
-
 
 ### Rodando os testes
 
 ```bash
-pytest -v
+docker compose run --rm --entrypoint pytest pipeline tests/ -v
 ```
-
-### Testando sem depender da internet (modo mock)
-
-Se a fonte de dados estiver instável ou sua conexão não for confiável para
-baixar arquivos de ~2GB, use o modo `mock` — ele gera dados sintéticos
-localmente (12 matrizes + 7 filiais ativas em SP, mais alguns registros de
-"ruído" para validar o filtro), sem acessar a internet nenhuma vez:
-
-```bash
-# Docker
-docker compose run --rm pipeline --year 2025 --month 12 --mock
-
-# Airflow: no Trigger DAG w/ config, marque o campo "mock" como true
-```
-
-Isso valida toda a orquestração (Bronze → Silver → Gold, Airflow, retries,
-XCom) em segundos, útil para separar "meu pipeline funciona" de "minha
-internet aguenta baixar 2GB agora" — são duas perguntas diferentes.
-
-### Testando rapidamente, sem esperar o mês inteiro baixar
-
-Os arquivos de `Estabelecimentos` vêm divididos em ~10 partes. Para validar
-que o pipeline inteiro funciona (bronze → silver → gold) sem esperar todas
-baixarem, use `--sample N` para baixar só as N primeiras partes:
-
-```bash
-# Docker
-docker compose run --rm pipeline --year 2025 --month 12 --sample 1
-
-# Local
-python -m src.pipeline --year 2025 --month 12 --sample 1
-```
-
-⚠️ Com `--sample`, o resultado final é uma **amostra parcial** (só uma fração
-dos CNPJs do mês), não a contagem real de São Paulo — serve apenas para
-validar que a pipeline roda ponta a ponta sem erros. Para o resultado
-correto e completo, rode sem essa flag.
 
 ---
 
-## Orquestração com Airflow (evolução do MVP)
+## Desafios técnicos resolvidos
 
-Além de rodar via `python -m src.pipeline` (script direto), o projeto agora
-também pode ser orquestrado pelo **Apache Airflow**, transformando as 3
-camadas em tarefas independentes de uma DAG (`dags/cnpj_pipeline_dag.py`).
+**Resiliência a instabilidade da fonte de dados oficial.** O domínio
+oficial da Receita Federal apresenta indisponibilidade frequente. A
+ingestão tenta, em ordem, dois domínios oficiais e, na falha de ambos, um
+mirror mantido pela Casa dos Dados — com estrutura de pastas diferente,
+tratada à parte na resolução do período.
 
-**Por que isso é uma evolução real, não só "rodar o mesmo código diferente":**
-- Se só a camada Silver falhar, o Airflow reprocessa **só ela** — não
-  precisa baixar tudo de novo (a idempotência que já existia no projeto
-  passa a ser aproveitada automaticamente pelo orquestrador).
-- Retries automáticos configurados por tarefa (3 tentativas, 2 min de
-  espera entre elas).
-- Agendamento nativo (roda sozinho todo dia 20 do mês, sem precisar de
-  ninguém disparar manualmente).
-- Interface visual (`localhost:8080`) mostrando o progresso de cada etapa.
+**Retomada de download (resume).** Arquivos de ~2GB em conexões instáveis
+frequentemente têm a conexão interrompida no meio do streaming. A
+implementação grava em um arquivo `.partial` e, ao reconectar, retoma a
+partir do último byte confirmado (cabeçalho HTTP `Range`), em vez de
+reiniciar o download do zero — reduzindo drasticamente o tempo total em
+cenários de rede instável.
 
-### Como subir o Airflow
+**Isolamento entre dados de teste e dados de produção.** Uma versão
+inicial do modo `mock` gravava os dados sintéticos no mesmo endereço de
+armazenamento (`ano-mês`) que os dados reais usariam. Isso fazia com que
+uma execução real subsequente, ao checar idempotência, encontrasse os
+dados fictícios e pulasse o download real — contaminando o resultado
+silenciosamente. Corrigido isolando o namespace de armazenamento por modo
+de execução (`MOCK-ano-mês` vs. `ano-mês`).
 
-```bash
-docker compose up airflow-init      # roda uma vez, cria o banco e o usuário admin
-docker compose up airflow-webserver airflow-scheduler minio -d
-```
+**Resolução de DNS intermitente em ambiente containerizado.** Em cenários
+de instabilidade de rede prolongada, a resolução de nomes de domínio
+dentro dos containers pode degradar mesmo com conectividade normal na
+máquina host. Mitigado fixando servidores DNS públicos nos serviços que
+acessam a internet.
 
-Acessa `http://localhost:8080` — login `admin` / senha `admin`.
+**Timeout de inicialização do servidor web em ambientes com recurso
+limitado.** O tempo padrão de inicialização dos processos do Airflow
+Webserver pode não ser suficiente em ambientes com CPU/memória
+compartilhados. Ajustado via configuração de timeout e redução do número
+de workers.
 
-Na interface, ativa a DAG `cnpj_pipeline_matriz_filial_sp` (ela vem pausada
-por padrão) e clica em "Trigger DAG" para rodar manualmente. Para rodar com
-parâmetros diferentes de ano/mês/amostra, usa "Trigger DAG w/ config":
-```json
-{"year": 2025, "month": 12, "sample": 1}
-```
+**Nomeação inconsistente de colunas ao ler CSV sem cabeçalho.** O motor de
+leitura infere nomes de coluna (`columnN`) cuja formatação varia conforme
+o número total de colunas do arquivo. Resolvido especificando os nomes de
+coluna explicitamente na leitura, eliminando a dependência desse
+comportamento implícito.
 
-### O que muda internamente
-
-As tarefas da DAG (`_task_bronze`, `_task_silver`, `_task_gold` em
-`dags/cnpj_pipeline_dag.py`) chamam **as mesmas funções** de
-`src/ingest.py`, `src/process.py` e `src/aggregate.py` — nenhuma lógica de
-negócio foi duplicada. O Airflow só decide **quando e como** rodar cada
-etapa; a lógica de filtrar SP/Ativa/Matriz-Filial continua isolada e
-testável independentemente (`tests/test_pipeline.py` continua válido).
-
----
-
-## Desafios enfrentados durante o desenvolvimento
-
-Documentado de propósito — problemas de engenharia de dados do "mundo real"
-que apareceram testando este projeto contra a fonte de dados de verdade, e
-como cada um foi resolvido:
-
-**1. Domínio oficial da RFB instável (`dadosabertos.rfb.gov.br`)**
-Esse portal frequentemente fica lento ou fora do ar (comum em portais
-governamentais de grande volume de acesso). Solução: `ingest.py` tenta, em
-ordem, dois domínios oficiais e, se ambos falharem, um **mirror** mantido
-pela Casa dos Dados (mesma fonte, replicada via CDN) — com estrutura de
-pastas diferente (`YYYY-MM-DD/` em vez de `YYYY-MM/`), tratada à parte na
-função `_list_mirror_folder_and_files`.
-
-**2. Downloads grandes quebrando no meio (`ChunkedEncodingError` / `IncompleteRead`)**
-Arquivos de ~1-2GB por partição, em conexão doméstica, ocasionalmente têm a
-conexão derrubada no meio do streaming. Solução: retry automático com
-backoff em `_download_file` (até 4 tentativas, descartando o arquivo
-parcial antes de tentar de novo).
-
-**3. Falha de resolução de DNS dentro do container (WSL2 + Docker)**
-Após o notebook suspender/dormir com o container rodando, o DNS interno do
-Docker (no ambiente WSL2) parou de resolver nomes de domínio
-(`Name or service not known`), mesmo com internet normal no host. Solução:
-DNS fixo (`8.8.8.8`, `1.1.1.1`) configurado no `docker-compose.yml` para o
-serviço `pipeline`, mais o hábito de rodar `wsl --shutdown` (PowerShell)
-para resetar o estado de rede quando isso ocorre.
-
-**4. Parâmetro `encoding` incompatível com a versão do DuckDB usada**
-`read_csv_auto(..., encoding='latin-1')` não é aceito nessa versão do
-DuckDB (função não tem esse parâmetro nomeado). Solução: converter os CSVs
-de `latin-1` para `utf-8` em streaming logo após a extração do zip
-(`_transcode_latin1_to_utf8` em `process.py`), antes de qualquer leitura
-via SQL.
-
-**5. Nomeação automática de colunas sem cabeçalho, inconsistente entre arquivos**
-Ao ler CSVs sem header, o DuckDB nomeia colunas como `columnN`, mas a
-quantidade de dígitos/zeros à esquerda usada varia conforme o número total
-de colunas do arquivo (`column00`.."column29" para 30 colunas, mas
-`column0`/`column1` — sem zero à esquerda — para um arquivo de só 2
-colunas como `Municipios`). Isso quebrou a query na primeira tentativa.
-Solução definitiva (mais robusta que só ajustar o índice): usar o parâmetro
-`names=[...]` do `read_csv_auto` para nomear as colunas explicitamente na
-leitura, eliminando de vez a dependência desse comportamento interno.
+**Encoding incompatível com a versão da biblioteca de processamento.**
+Os CSVs da RFB são publicados em `latin-1`; a leitura via SQL nessa versão
+específica do motor de processamento não aceitava esse parâmetro
+diretamente. Resolvido convertendo os arquivos para `utf-8` em streaming
+antes da leitura.
 
 ---
 
-## Decisões e limitações conhecidas (transparência)
+## Decisões e limitações conhecidas
 
-- **Escopo dos arquivos baixados:** o pipeline baixa apenas
-  `Estabelecimentos*.zip` e `Municipios.zip`, os únicos necessários para
-  responder à pergunta de negócio. Os arquivos de `Empresas`, `Socios`,
-  `Simples` etc. não são baixados, o que evita dezenas de GB de tráfego
-  desnecessário para este MVP.
-- **Volume de dados:** os arquivos de Estabelecimentos são grandes (vários
-  GB por mês, em 10 partes). Em uma máquina com pouca memória/disco, a
-  primeira execução pode demorar — isso é esperado e é justamente o
-  problema que o DuckDB (streaming) resolve, em vez de carregar tudo em
-  pandas.
-- **Encoding:** os CSVs da RFB vêm em `latin-1` e separados por `;`,
-  tratado explicitamente em `process.py`.
-- **Próximos passos naturais** (fora do escopo deste MVP, mas documentados
-  como evolução): orquestração via Airflow com agendamento mensal
-  automático, migração do processamento para PySpark em cluster, alertas
-  de qualidade de dados (ex: `great_expectations`), e particionamento
-  histórico por mês na camada gold para permitir séries temporais.
+- O pipeline baixa apenas `Estabelecimentos*.zip` e `Municipios.zip` — os
+  únicos necessários para responder à pergunta de negócio.
+- O resultado documentado acima refere-se a uma amostra (`sample: 1`, uma
+  das ~10 partições do arquivo); o mês completo requer mais tempo de
+  download, mas usa exatamente a mesma lógica de negócio.
+- Postgres neste projeto armazena **apenas metadados de orquestração do
+  Airflow** (histórico de execuções) — não contém dados de negócio, que
+  residem inteiramente no MinIO/S3.
+- Próximos passos: migração de MinIO para AWS S3, carga em Snowflake via
+  `COPY INTO`, transformações com dbt, e dashboard em Power BI.
