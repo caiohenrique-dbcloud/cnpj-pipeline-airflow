@@ -146,7 +146,7 @@ w/ config"** para rodar com parâmetros customizados:
 O projeto inclui um modo de teste com **dados sintéticos**, isolado por
 namespace dos dados reais (prefixo `MOCK-` no armazenamento — nunca ocupa
 o mesmo endereço que dados de produção usariam). Isso permite validar toda
-a orquestração em segundos, sem depender de baixar arquivos de ~2GB:
+a orquestração em segundos, sem depender de baixar arquivos de 2GB:
 
 ```json
 {"year": 2025, "month": 12, "mock": true}
@@ -176,7 +176,7 @@ ingestão tenta, em ordem, dois domínios oficiais e, na falha de ambos, um
 mirror mantido pela Casa dos Dados — com estrutura de pastas diferente,
 tratada à parte na resolução do período.
 
-**Retomada de download (resume).** Arquivos de ~2GB em conexões instáveis
+**Retomada de download (resume).** Arquivos de 2GB em conexões instáveis
 frequentemente têm a conexão interrompida no meio do streaming. A
 implementação grava em um arquivo `.partial` e, ao reconectar, retoma a
 partir do último byte confirmado (cabeçalho HTTP `Range`), em vez de
@@ -222,7 +222,7 @@ antes da leitura.
 - O pipeline baixa apenas `Estabelecimentos*.zip` e `Municipios.zip` — os
   únicos necessários para responder à pergunta de negócio.
 - O resultado documentado acima refere-se a uma amostra (`sample: 1`, uma
-  das ~10 partições do arquivo); o mês completo requer mais tempo de
+  das 10 partições do arquivo); o mês completo requer mais tempo de
   download, mas usa exatamente a mesma lógica de negócio.
 - Postgres neste projeto armazena **apenas metadados de orquestração do
   Airflow** (histórico de execuções) — não contém dados de negócio, que
