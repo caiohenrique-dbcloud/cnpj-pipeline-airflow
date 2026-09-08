@@ -1,6 +1,4 @@
 **Stack:** Python · Docker · Apache Airflow · AWS S3 · DuckDB
-
-# Adição/Ajuste ao README — Destacando a Evolução
 ## O que este projeto adiciona em relação ao pipeline base
 
 Este repositório evolui o [pipeline base](https://github.com/caiohenrique-dbcloud/cnpj-pipeline)
