@@ -1,4 +1,7 @@
+# Pipeline CNPJ — Matriz vs. Filial em São Paulo (com Apache Airflow)
+
 **Stack:** Python · Docker · Apache Airflow · AWS S3 · DuckDB
+
 ## O que este projeto adiciona em relação ao pipeline base
 
 Este repositório evolui o [pipeline base](https://github.com/caiohenrique-dbcloud/cnpj-pipeline)
