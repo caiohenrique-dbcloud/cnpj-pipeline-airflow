@@ -16,9 +16,6 @@ e *onde* esse código é executado.
 
 ---
 
-## Sugestão 2: seção detalhada sobre o S3 (mantém o que já te passei antes,
-## só ajustando a abertura para reforçar que é uma extensão, não algo isolado)
-
 ## Evolução: de MinIO local para AWS S3 real
 
 Depois de validar a orquestração com Airflow (seção anterior), o próximo
