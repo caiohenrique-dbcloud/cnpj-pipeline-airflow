@@ -1,4 +1,4 @@
-# Pipeline CNPJ — Matriz vs. Filial em São Paulo (com Apache Airflow)
+# Pipeline CNPJ - Matriz vs. Filial em São Paulo (com Apache Airflow + S3)
 
 **Stack:** Python · Docker · Apache Airflow · AWS S3 · DuckDB
 
