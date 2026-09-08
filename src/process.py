@@ -72,13 +72,7 @@ def run_silver_processing(year: int, month: int, storage: Storage, force: bool =
     # Baixa da bronze (MinIO ou local) para um diretório temporário e descompacta.
     import re as _re
 
-    bronze_root = config.LOCAL_DATA_DIR / config.BUCKET_BRONZE / prefix
-    if storage.use_minio:
-        # Lista objetos do bucket bronze para esse prefixo.
-        objects = storage.client.list_objects(config.BUCKET_BRONZE, prefix=f"{prefix}/", recursive=True)
-        filenames = [Path(obj.object_name).name for obj in objects]
-    else:
-        filenames = [p.name for p in bronze_root.glob("*.zip")]
+    filenames = storage.list_object_names(config.BUCKET_BRONZE, f"{prefix}/")
 
     for filename in filenames:
         key = f"{prefix}/{filename}"

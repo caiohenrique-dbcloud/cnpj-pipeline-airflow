@@ -138,6 +138,8 @@ services:
       - 8.8.8.8
       - 1.1.1.1
     environment: *airflow-env
+    env_file:
+      - .env
     volumes: *airflow-volumes
     command: airflow scheduler
 
