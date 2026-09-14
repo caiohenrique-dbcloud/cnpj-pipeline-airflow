@@ -8,3 +8,9 @@ data/
 .tmp_gold/
 airflow_logs/*
 !airflow_logs/.gitkeep
+
+# Terraform
+terraform/.terraform/
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/*.tfvars
