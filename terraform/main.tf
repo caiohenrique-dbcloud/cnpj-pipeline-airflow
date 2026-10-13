@@ -1,4 +1,3 @@
-
 terraform {
   required_providers {
     aws = {
@@ -17,8 +16,9 @@ provider "aws" {
 }
 
 provider "snowflake" {
-  # As credenciais do Snowflake serão configuradas via variáveis de ambiente
-  # (SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_PASSWORD, etc.)
+  # Credenciais via variáveis de ambiente (~/.snowflake_env):
+  # SNOWFLAKE_ORGANIZATION_NAME, SNOWFLAKE_ACCOUNT_NAME,
+  # SNOWFLAKE_USER, SNOWFLAKE_PASSWORD, SNOWFLAKE_ROLE
 }
 
 resource "aws_s3_bucket" "cnpj_datalake" {
@@ -29,4 +29,24 @@ resource "aws_s3_bucket" "cnpj_datalake" {
     Environment = "dev"
     ManagedBy   = "terraform"
   }
+}
+
+resource "snowflake_warehouse" "cnpj_wh" {
+  name                = "CNPJ_WH"
+  warehouse_size      = "XSMALL"
+  auto_suspend        = 60
+  auto_resume         = true
+  initially_suspended = true
+  comment             = "Warehouse do pipeline CNPJ (XSMALL, suspende em 60s)"
+}
+
+resource "snowflake_database" "cnpj_db" {
+  name    = "CNPJ_DB"
+  comment = "Database do pipeline CNPJ"
+}
+
+resource "snowflake_schema" "raw" {
+  database = snowflake_database.cnpj_db.name
+  name     = "RAW"
+  comment  = "Dados brutos carregados do S3"
 }
